@@ -1,167 +1,96 @@
 import streamlit as st
-import requests
+import pandas as pd
+import asyncio
+import aiohttp
+from utils import get_api_tests
 
-st.set_page_config(page_title="Universal API Key Tester", layout="centered")
+st.set_page_config(page_title="Multi-API Key Tester", page_icon="🔑", layout="wide")
 
-st.title("🔑 Universal API Key Tester + Chat Client")
+st.title("🔑 Multi-API Key Tester (Auto Detection, Correct Status)")
+st.write("Tests: OpenRouter, Groq, Gemini, Anthropic, Mistral, DeepSeek — fully automatic.")
 
-# -------------------------------
-# Detect API Type
-# -------------------------------
-def detect_api_type(key: str) -> str:
-    key = key.strip().lower()
+# -------------------------
+# INPUT SECTION
+# -------------------------
+mode = st.radio("Choose Input Method", ["Paste Keys", "Upload File"])
 
-    if key.startswith("sk-"):
-        return "openai-like"
+keys = []
 
-    if key.startswith("g-") or key.startswith("ai"):
-        return "google-gemini"
+if mode == "Paste Keys":
+    data = st.text_area("Paste API keys (one per line)", height=200)
+    if data:
+        keys = [k.strip() for k in data.splitlines() if k.strip()]
+else:
+    uploaded = st.file_uploader("Upload a .txt file containing keys")
+    if uploaded:
+        keys = uploaded.read().decode().splitlines()
 
-    if key.startswith("hf_"):
-        return "huggingface"
+if not keys:
+    st.info("Waiting for API keys...")
+    st.stop()
 
-    if len(key) > 20:
-        return "unknown-maybe-valid"
+# -------------------------
+# TEST ONE KEY
+# -------------------------
+async def test_key(session, key):
+    tests = get_api_tests(key)
+    key_worked = False
 
-    return "unknown"
-
-
-# -------------------------------
-# Validate API Key
-# -------------------------------
-def validate_key(api_key: str, api_type: str):
-    try:
-        if api_type == "openai-like":
-            headers = {
-                "Authorization": f"Bearer {api_key}"
-            }
-            res = requests.get("https://api.openai.com/v1/models", headers=headers)
-            if res.status_code == 200:
-                return "valid", res.json()
-            elif res.status_code == 401:
-                return "invalid", None
+    for t in tests:
+        try:
+            if t["method"] == "GET":
+                async with session.get(t["url"], headers=t["headers"], timeout=10) as res:
+                    status = res.status
             else:
-                return "unknown", res.text
+                async with session.post(t["url"], headers=t["headers"], json=t["payload"], timeout=10) as res:
+                    status = res.status
 
-        elif api_type == "google-gemini":
-            res = requests.get(
-                f"https://generativelanguage.googleapis.com/v1/models?key={api_key}"
-            )
-            if res.status_code == 200:
-                return "valid", res.json()
-            elif res.status_code == 403:
-                return "invalid", None
-            else:
-                return "unknown", res.text
+            if status == 200:
+                return key, t["api"], "VALID"
 
-        elif api_type == "huggingface":
-            headers = {"Authorization": f"Bearer {api_key}"}
-            res = requests.get("https://api.huggingface.co/models", headers=headers)
-            if res.status_code == 200:
-                return "valid", res.json()
-            elif res.status_code == 401:
-                return "invalid", None
-            else:
-                return "unknown", res.text
+            if status == 429:
+                return key, t["api"], "RATE LIMITED"
 
-        elif api_type == "unknown-maybe-valid":
-            # Unknown API provider → cannot verify
-            return "unknown", None
+            if status == 401:
+                continue  # invalid for this provider → try next
 
+        except Exception:
+            continue  # skip errors
+
+    # If no provider returned valid or rate limited, mark as INVALID
+    return key, "Unknown", "INVALID"
+
+# -------------------------
+# RUN ALL TESTS
+# -------------------------
+async def run_tests(all_keys):
+    async with aiohttp.ClientSession() as session:
+        tasks = [test_key(session, key) for key in all_keys]
+        return await asyncio.gather(*tasks)
+
+# -------------------------
+# START TESTING
+# -------------------------
+if st.button("🚀 Start Testing All Keys"):
+    with st.spinner("Testing in progress..."):
+        results = asyncio.run(run_tests(keys))
+
+    df = pd.DataFrame(results, columns=["API Key", "Detected API", "Status"])
+    st.success("Testing Complete!")
+    st.dataframe(df, height=450)
+
+    # Highlight VALID vs INVALID vs RATE LIMITED
+    def color_status(val):
+        if val == "VALID":
+            return 'background-color: #b6fcb6'
+        elif val == "INVALID":
+            return 'background-color: #ffb6b6'
+        elif val == "RATE LIMITED":
+            return 'background-color: #fff3b6'
         else:
-            return "unknown", None
+            return ''
 
-    except Exception as e:
-        return "unknown", str(e)
+    st.dataframe(df.style.applymap(color_status, subset=["Status"]))
 
-
-# -------------------------------
-# Chat Function for Valid Keys
-# -------------------------------
-def chat_with_api(api_key: str, api_type: str, user_msg: str):
-    try:
-        if api_type == "openai-like":
-            url = "https://api.openai.com/v1/chat/completions"
-            headers = {"Authorization": f"Bearer {api_key}"}
-            data = {
-                "model": "gpt-3.5-turbo",
-                "messages": [{"role": "user", "content": user_msg}],
-            }
-            res = requests.post(url, json=data, headers=headers)
-            return res.json()
-
-        elif api_type == "google-gemini":
-            url = (
-                f"https://generativelanguage.googleapis.com/v1/models/"
-                "gemini-pro:generateContent?key=" + api_key
-            )
-            data = {
-                "contents": [{"parts": [{"text": user_msg}]}]
-            }
-            res = requests.post(url, json=data)
-            return res.json()
-
-        elif api_type == "huggingface":
-            url = "https://api.huggingface.co/chat/completions"
-            headers = {"Authorization": f"Bearer {api_key}"}
-            data = {
-                "model": "HuggingFaceH4/zephyr-7b-beta",
-                "messages": [{"role": "user", "content": user_msg}],
-            }
-            res = requests.post(url, json=data, headers=headers)
-            return res.json()
-
-        return {"error": "Unknown API type, cannot chat"}
-
-    except Exception as e:
-        return {"error": str(e)}
-
-
-# -------------------------------
-# UI
-# -------------------------------
-api_key = st.text_input("Enter API Key", type="password")
-
-if st.button("🔍 Test Key"):
-    if not api_key:
-        st.warning("Please enter an API key.")
-    else:
-        api_type = detect_api_type(api_key)
-        status, data = validate_key(api_key, api_type)
-
-        st.subheader("🔎 Detection Result")
-        st.write(f"**API Type:** {api_type}")
-
-        if status == "valid":
-            st.success("✅ VALID KEY")
-
-        elif status == "invalid":
-            st.error("❌ INVALID KEY")
-
-        else:
-            st.warning("⚠️ UNKNOWN — API does not match any known provider, might still be valid for other services.")
-
-        if data:
-            st.json(data)
-
-        st.session_state["api_key"] = api_key
-        st.session_state["api_type"] = api_type
-
-
-# -------------------------------
-# Chat UI (only if valid)
-# -------------------------------
-if "api_key" in st.session_state:
-    st.markdown("---")
-    st.subheader("💬 Test Chat (for valid keys)")
-
-    user_message = st.text_input("Send a message:")
-
-    if st.button("Send"):
-        response = chat_with_api(
-            st.session_state["api_key"],
-            st.session_state["api_type"],
-            user_message,
-        )
-        st.write("### Response:")
-        st.json(response)
+    csv = df.to_csv(index=False).encode()
+    st.download_button("📥 Download Results CSV", csv, "results.csv", "text/csv")
