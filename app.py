@@ -1,87 +1,128 @@
 import streamlit as st
-import pandas as pd
-import asyncio
-import aiohttp
-from utils import get_api_tests
+import requests
+import re
 
-st.set_page_config(page_title="Multi-API Key Tester", page_icon="🔑", layout="wide")
+st.set_page_config(page_title="Universal API Key Checker", layout="centered")
 
-st.title("🔑 Multi-API Key Tester (Auto Detection, No OpenAI)")
+# -------------------------------
+# Pattern Detection
+# -------------------------------
+def detect_key_type(key):
+    if key.startswith("sk-") and len(key) > 20:
+        return "openai"
+    if key.startswith("or-"):
+        return "openrouter"
+    if key.startswith("AI") or key.startswith("g-"):
+        return "gemini"
+    return "unknown"
 
-st.write("Tests: OpenRouter, Groq, Gemini, Anthropic, Mistral, DeepSeek — fully automatic.")
+# -------------------------------
+# Check OpenAI Key
+# -------------------------------
+def check_openai(key):
+    try:
+        r = requests.get(
+            "https://api.openai.com/v1/models",
+            headers={"Authorization": f"Bearer {key}"}
+        )
+        if r.status_code == 200:
+            return "VALID"
+        if r.status_code in [401, 403]:
+            return "INVALID"
+        return "UNKNOWN"
+    except:
+        return "UNKNOWN"
 
+# -------------------------------
+# OpenRouter Key Check
+# -------------------------------
+def check_openrouter(key):
+    try:
+        r = requests.get(
+            "https://openrouter.ai/api/v1/models",
+            headers={"Authorization": f"Bearer {key}"}
+        )
+        if r.status_code == 200:
+            return "VALID"
+        if r.status_code in [401, 403]:
+            return "INVALID"
+        return "UNKNOWN"
+    except:
+        return "UNKNOWN"
 
-# -------------------------
-# INPUT SECTION
-# -------------------------
-mode = st.radio("Choose Input Method", ["Paste Keys", "Upload File"])
+# -------------------------------
+# Gemini Key Check
+# -------------------------------
+def check_gemini(key):
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1/models?key={key}"
+        r = requests.get(url)
+        if r.status_code == 200:
+            return "VALID"
+        if r.status_code in [400, 401, 403]:
+            return "INVALID"
+        return "UNKNOWN"
+    except:
+        return "UNKNOWN"
 
-keys = []
+# -------------------------------
+# UNKNOWN type simple check
+# -------------------------------
+def check_unknown_key(key):
+    """
+    Always return UNKNOWN because no API type detected.
+    """
+    return "UNKNOWN"
 
-if mode == "Paste Keys":
-    data = st.text_area("Paste all API keys (one per line)", height=200)
-    if data:
-        keys = [k.strip() for k in data.splitlines() if k.strip()]
-else:
-    uploaded = st.file_uploader("Upload a .txt file containing keys")
-    if uploaded:
-        keys = uploaded.read().decode().splitlines()
+# -------------------------------
+# MAIN CHECK FUNCTION
+# -------------------------------
+def check_key(key):
+    key_type = detect_key_type(key)
 
-if not keys:
-    st.info("Waiting for API keys...")
-    st.stop()
+    if key_type == "openai":
+        return "OpenAI", check_openai(key)
+    if key_type == "openrouter":
+        return "OpenRouter", check_openrouter(key)
+    if key_type == "gemini":
+        return "Gemini", check_gemini(key)
 
+    # Fallback
+    return "Unknown", check_unknown_key(key)
 
-# -------------------------
-# TEST ONE KEY
-# -------------------------
-async def test_key(session, key):
-    tests = get_api_tests(key)
+# -------------------------------
+# STREAMLIT UI
+# -------------------------------
+st.title("🔑 Universal API Key Validator")
+st.write("Paste **any** key — OpenAI, OpenRouter, Gemini, or unknown type.")
 
-    for t in tests:
-        try:
-            if t["method"] == "GET":
-                async with session.get(t["url"], headers=t["headers"], timeout=10) as res:
-                    status = res.status
-            else:
-                async with session.post(t["url"], headers=t["headers"], json=t["payload"], timeout=10) as res:
-                    status = res.status
+keys_input = st.text_area(
+    "Enter multiple keys (each on new line):",
+    height=250,
+    placeholder="sk-xxxxxxxxx\nor-xxxxxxxx\nAIxxxxxxxxxxx\nabcd1234..."
+)
 
-            if status == 200:
-                return key, t["api"], "VALID"
+if st.button("Check Keys"):
+    if not keys_input.strip():
+        st.warning("Enter at least one API key.")
+    else:
+        keys = keys_input.strip().split("\n")
 
-            if status == 429:
-                return key, t["api"], "RATE LIMITED"
+        result_table = []
 
-            # If 401 → invalid for this provider → try next
-            if status == 401:
+        for k in keys:
+            clean = k.strip()
+            if clean == "":
                 continue
 
-        except Exception:
-            continue
+            key_type, status = check_key(clean)
+            result_table.append([clean[:10] + "..." if len(clean) > 13 else clean, key_type, status])
 
-    return key, "Unknown", "INVALID"
-
-
-# -------------------------
-# RUN ALL TESTS
-# -------------------------
-async def run_tests(all_keys):
-    async with aiohttp.ClientSession() as session:
-        tasks = [test_key(session, key) for key in all_keys]
-        return await asyncio.gather(*tasks)
-
-
-# -------------------------
-# START TESTING
-# -------------------------
-if st.button("🚀 Start Testing All Keys"):
-    with st.spinner("Testing in progress..."):
-        results = asyncio.run(run_tests(keys))
-
-    df = pd.DataFrame(results, columns=["API Key", "Detected API", "Status"])
-    st.success("Testing Complete!")
-    st.dataframe(df, height=450)
-
-    csv = df.to_csv(index=False).encode()
-    st.download_button("📥 Download Results CSV", csv, "results.csv", "text/csv")
+        st.subheader("Results")
+        st.table(
+            {
+                "Key": [r[0] for r in result_table],
+                "API Type": [r[1] for r in result_table],
+                "Status": [r[2] for r in result_table],
+            }
+        )
