@@ -13,7 +13,7 @@ API_LIST = [
     },
     {
         "name": "Google Gemini",
-        "url": None,  # uses GET
+        "url": None,  # handled separately
         "headers": lambda key: {},
         "payload": None,
     },
@@ -43,9 +43,10 @@ API_LIST = [
 
 def get_api_tests(key):
     tests = []
+
     for api in API_LIST:
 
-        # Gemini uses GET
+        # GEMINI uses GET request
         if api["name"] == "Google Gemini":
             tests.append({
                 "api": api["name"],
