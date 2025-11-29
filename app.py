@@ -6,7 +6,7 @@ from utils import get_api_tests
 
 st.set_page_config(page_title="Multi-API Key Tester", page_icon="🔑", layout="wide")
 
-st.title("🔑 Multi-API Key Tester (Auto Detection, Correct Status)")
+st.title("🔑 Multi-API Key Tester (Full Detection, All Providers)")
 st.write("Tests: OpenRouter, Groq, Gemini, Anthropic, Mistral, DeepSeek — fully automatic.")
 
 # -------------------------
@@ -34,7 +34,6 @@ if not keys:
 # -------------------------
 async def test_key(session, key):
     tests = get_api_tests(key)
-    key_worked = False
 
     for t in tests:
         try:
@@ -45,19 +44,21 @@ async def test_key(session, key):
                 async with session.post(t["url"], headers=t["headers"], json=t["payload"], timeout=10) as res:
                     status = res.status
 
+            api_detected = t["api"]
+
             if status == 200:
-                return key, t["api"], "VALID"
-
-            if status == 429:
-                return key, t["api"], "RATE LIMITED"
-
-            if status == 401:
-                continue  # invalid for this provider → try next
+                return key, api_detected, "VALID"
+            elif status == 429:
+                return key, api_detected, "RATE LIMITED"
+            elif status == 401:
+                return key, api_detected, "INVALID"
+            else:
+                return key, api_detected, f"ERROR {status}"
 
         except Exception:
-            continue  # skip errors
+            continue  # try next API
 
-    # If no provider returned valid or rate limited, mark as INVALID
+    # Truly unknown if no API responds
     return key, "Unknown", "INVALID"
 
 # -------------------------
@@ -72,14 +73,13 @@ async def run_tests(all_keys):
 # START TESTING
 # -------------------------
 if st.button("🚀 Start Testing All Keys"):
-    with st.spinner("Testing in progress..."):
+    with st.spinner("Testing keys..."):
         results = asyncio.run(run_tests(keys))
 
     df = pd.DataFrame(results, columns=["API Key", "Detected API", "Status"])
     st.success("Testing Complete!")
-    st.dataframe(df, height=450)
 
-    # Highlight VALID vs INVALID vs RATE LIMITED
+    # Color-code status
     def color_status(val):
         if val == "VALID":
             return 'background-color: #b6fcb6'
@@ -90,7 +90,7 @@ if st.button("🚀 Start Testing All Keys"):
         else:
             return ''
 
-    st.dataframe(df.style.applymap(color_status, subset=["Status"]))
+    st.dataframe(df.style.applymap(color_status, subset=["Status"]), height=450)
 
     csv = df.to_csv(index=False).encode()
     st.download_button("📥 Download Results CSV", csv, "results.csv", "text/csv")
