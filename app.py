@@ -2,69 +2,86 @@ import streamlit as st
 import pandas as pd
 import asyncio
 import aiohttp
-from utils import detect_api_type, get_test_url
+from utils import get_api_tests
 
 st.set_page_config(page_title="Multi-API Key Tester", page_icon="🔑", layout="wide")
 
-st.title("🔑 Multi-API Key Tester (No OpenAI)")
+st.title("🔑 Multi-API Key Tester (Auto Detection, No OpenAI)")
 
-st.write("Supports OpenRouter, Gemini, Anthropic, Groq, Mistral, DeepSeek, Custom APIs.")
+st.write("Tests: OpenRouter, Groq, Gemini, Anthropic, Mistral, DeepSeek — fully automatic.")
 
-# ---- INPUT ----
-mode = st.radio("Input Mode", ["Paste Keys", "Upload File"])
+
+# -------------------------
+# INPUT SECTION
+# -------------------------
+mode = st.radio("Choose Input Method", ["Paste Keys", "Upload File"])
+
 keys = []
 
 if mode == "Paste Keys":
-    data = st.text_area("Paste API keys (one per line)")
+    data = st.text_area("Paste all API keys (one per line)", height=200)
     if data:
         keys = [k.strip() for k in data.splitlines() if k.strip()]
 else:
-    file = st.file_uploader("Upload .txt key file")
-    if file:
-        keys = file.read().decode().splitlines()
+    uploaded = st.file_uploader("Upload a .txt file containing keys")
+    if uploaded:
+        keys = uploaded.read().decode().splitlines()
 
 if not keys:
-    st.info("Waiting for keys...")
+    st.info("Waiting for API keys...")
     st.stop()
 
-# ---- ASYNC TEST ----
+
+# -------------------------
+# TEST ONE KEY
+# -------------------------
 async def test_key(session, key):
-    api_type = detect_api_type(key)
-    url, headers, payload = get_test_url(api_type, key)
+    tests = get_api_tests(key)
 
-    try:
-        async with session.post(url, headers=headers, json=payload, timeout=10) as res:
-            status = res.status
-            if status == 200:
-                return key, api_type, "VALID"
-            elif status == 401:
-                return key, api_type, "INVALID"
-            elif status == 429:
-                return key, api_type, "RATE LIMITED"
+    for t in tests:
+        try:
+            if t["method"] == "GET":
+                async with session.get(t["url"], headers=t["headers"], timeout=10) as res:
+                    status = res.status
             else:
-                return key, api_type, f"ERROR {status}"
-    except Exception as e:
-        return key, api_type, f"ERROR: {str(e)}"
+                async with session.post(t["url"], headers=t["headers"], json=t["payload"], timeout=10) as res:
+                    status = res.status
+
+            if status == 200:
+                return key, t["api"], "VALID"
+
+            if status == 429:
+                return key, t["api"], "RATE LIMITED"
+
+            # If 401 → invalid for this provider → try next
+            if status == 401:
+                continue
+
+        except Exception:
+            continue
+
+    return key, "Unknown", "INVALID"
 
 
-async def run(keys):
+# -------------------------
+# RUN ALL TESTS
+# -------------------------
+async def run_tests(all_keys):
     async with aiohttp.ClientSession() as session:
-        tasks = [test_key(session, key) for key in keys]
+        tasks = [test_key(session, key) for key in all_keys]
         return await asyncio.gather(*tasks)
 
 
-# ---- RUN ----
-if st.button("Test All Keys"):
-    with st.spinner("Testing keys..."):
-        results = asyncio.run(run(keys))
+# -------------------------
+# START TESTING
+# -------------------------
+if st.button("🚀 Start Testing All Keys"):
+    with st.spinner("Testing in progress..."):
+        results = asyncio.run(run_tests(keys))
 
-    df = pd.DataFrame(results, columns=["Key", "API Type", "Status"])
-    st.success("DONE")
-    st.dataframe(df)
+    df = pd.DataFrame(results, columns=["API Key", "Detected API", "Status"])
+    st.success("Testing Complete!")
+    st.dataframe(df, height=450)
 
-    st.download_button(
-        "Download CSV",
-        df.to_csv(index=False).encode(),
-        "results.csv",
-        "text/csv",
-    )
+    csv = df.to_csv(index=False).encode()
+    st.download_button("📥 Download Results CSV", csv, "results.csv", "text/csv")
